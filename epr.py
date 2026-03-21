@@ -52,6 +52,49 @@ MIN_AMBIENT_TEMP_F = -47  # Derate not allowed below -47°F (-44°C)
 # Minimum runway length for derate (feet)
 MIN_RUNWAY_LENGTH_FT = 7000
 
+# =========================
+# FLAPS CONFIGURATION
+# =========================
+
+# Available flap settings for takeoff (degrees)
+AVAILABLE_FLAPS = [10, 20]
+DEFAULT_FLAPS = 10
+
+# Runway-limited takeoff weight (k lbs) at 80°F for HKG RWY 31 (9491 ft)
+# Extracted from PDF: Hong Kong takeoff performance tables
+# Note: These are example values - actual tables vary by airport/runway
+RUNWAY_LIMIT_BASE_80F = {
+    10: 719.6,  # Flaps 10: 719.6k lbs at 80°F
+    20: 744.1,  # Flaps 20: 744.1k lbs at 80°F (allows ~24.5k lbs more)
+}
+
+# Climb-limited takeoff weight (k lbs)
+# From PDF: Climb limits decrease with higher flap settings
+CLIMB_LIMIT_WEIGHT = {
+    10: 840.0,  # Flaps 10: 840k lbs climb limit
+    20: 811.0,  # Flaps 20: 811k lbs climb limit (lower due to drag)
+}
+
+# Temperature correction for runway-limited weight (k lbs per °F above 80°F)
+# Approximate from PDF table data
+RUNWAY_LIMIT_TEMP_SLOPE = {
+    10: -0.638,  # Flaps 10: weight decreases ~0.64k lbs/°F
+    20: -0.727,  # Flaps 20: weight decreases ~0.73k lbs/°F
+}
+
+# Wind correction factors (lbs per knot)
+# From PDF: Headwind/Tailwind corrections by flap setting
+WIND_CORRECTION = {
+    10: {
+        'headwind': 1170,  # lbs/kt (increases limit weight)
+        'tailwind': -4190,  # lbs/kt (decreases limit weight)
+    },
+    20: {
+        'headwind': 3940,  # lbs/kt
+        'tailwind': -3940,  # lbs/kt
+    }
+}
+
 
 # =========================
 # INTERPOLATION
@@ -245,30 +288,34 @@ def thrust_ratio(reduced_epr, max_epr):
     return reduced_epr / max_epr
 
 
-def v_speeds(weight, assumed_temp_f, oat_f):
+def v_speeds(weight, assumed_temp_f, oat_f, flaps):
     """
     Calculate V1, VR, V2 speeds.
     Per PDF: Use speeds at assumed temperature, but not less than V-minimum.
-    This is a simplified implementation - actual QRH has detailed tables.
+    Flap setting affects V-speeds (higher flaps = lower speeds).
     """
+    # Flap correction factor (20 flaps = slightly lower speeds than 10 flaps)
+    flap_correction = 0 if flaps == 10 else -2
+    
     # Base V-speeds from weight (similar to 747 characteristics)
-    v2_base = 140 + 0.2 * (weight - 250)
+    v2_base = 140 + 0.2 * (weight - 250) + flap_correction
     vr_base = v2_base - 10
     v1_base = vr_base - 5
-    
+
     # Temperature correction (higher temp = higher speeds)
     # For each 10°F above standard (59°F), increase by ~1 knot
     temp_correction = max(0, (assumed_temp_f - 59)) * 0.1
-    
+
     v2 = v2_base + temp_correction
     vr = vr_base + temp_correction
     v1 = v1_base + temp_correction
-    
+
     # Minimum speeds (simplified - actual QRH has V-min table)
-    v2_min = 130
-    vr_min = 120
-    v1_min = 110
-    
+    # Vary slightly by flap setting
+    v2_min = 128 if flaps == 20 else 130
+    vr_min = 118 if flaps == 20 else 120
+    v1_min = 108 if flaps == 20 else 110
+
     # Use the HIGHEST of calculated vs minimum (per PDF procedure)
     return (
         round(max(v1, v1_min)),
@@ -277,39 +324,157 @@ def v_speeds(weight, assumed_temp_f, oat_f):
     )
 
 
+def calculate_runway_limit_weight(flaps, temp_f, wind_headwind=0, wind_tailwind=0,
+                                   runway_length_ft=9491, slope_pct=0):
+    """
+    Calculate runway-limited takeoff weight based on flap setting, temperature, and wind.
+    Based on PDF Hong Kong RWY 31 tables.
+    
+    Args:
+        flaps: Flap setting (10 or 20)
+        temp_f: Temperature in °F
+        wind_headwind: Headwind component in knots
+        wind_tailwind: Tailwind component in knots
+        runway_length_ft: Runway length in feet (default: HKG RWY 31 = 9491 ft)
+        slope_pct: Runway slope percentage (default: 0)
+    
+    Returns:
+        Runway-limited weight in k lbs
+    """
+    # Base weight at 80°F for reference runway (9491 ft)
+    base_weight = RUNWAY_LIMIT_BASE_80F.get(flaps, 719.6)
+    
+    # Temperature correction (from 80°F reference)
+    temp_delta = temp_f - 80
+    temp_correction = RUNWAY_LIMIT_TEMP_SLOPE.get(flaps, -0.638) * temp_delta
+    
+    # Wind correction
+    if wind_headwind > 0:
+        wind_corr_lbs = WIND_CORRECTION[flaps]['headwind'] * wind_headwind
+    elif wind_tailwind > 0:
+        wind_corr_lbs = WIND_CORRECTION[flaps]['tailwind'] * wind_tailwind
+    else:
+        wind_corr_lbs = 0
+    
+    wind_correction_k = wind_corr_lbs / 1000  # Convert to k lbs
+    
+    # Runway length correction (approximate: proportional to available runway)
+    reference_runway = 9491  # HKG RWY 31
+    runway_factor = runway_length_ft / reference_runway
+    
+    # Slope correction (uphill = more weight allowed, downhill = less)
+    # Approximate: 1% slope ≈ 2% weight adjustment
+    slope_correction = slope_pct * 0.02 * base_weight
+    
+    # Calculate final limit
+    limit_weight = (base_weight + temp_correction + wind_correction_k) * runway_factor + slope_correction
+    
+    return max(0, limit_weight)
+
+
+def calculate_climb_limit_weight(flaps, pa_kft, temp_f):
+    """
+    Calculate climb-limited takeoff weight based on flap setting and conditions.
+    From PDF: Climb limits are fixed but decrease with higher flap settings.
+    
+    Args:
+        flaps: Flap setting (10 or 20)
+        pa_kft: Pressure altitude in thousands of feet
+        temp_f: Temperature in °F
+    
+    Returns:
+        Climb-limited weight in k lbs
+    """
+    # Base climb limit at sea level, standard conditions
+    base_climb_limit = CLIMB_LIMIT_WEIGHT.get(flaps, 840.0)
+    
+    # Altitude correction (climb performance decreases with altitude)
+    # Approximate: 2% reduction per 1000 ft PA
+    altitude_factor = 1.0 - (pa_kft * 0.02)
+    
+    # Temperature correction (climb performance decreases with temp)
+    # Approximate: 0.5% reduction per °F above 59°F (ISA)
+    temp_factor = 1.0 - max(0, (temp_f - 59)) * 0.005
+    
+    climb_limit = base_climb_limit * altitude_factor * temp_factor
+    
+    return max(0, climb_limit)
+
+
 # =========================
 # CORE CALCULATION
 # =========================
 
-def calculate(elevation_ft, qnh, oat_c, weight, runway_m, 
-              packs_off_3=False, runway_dry=True,
+def calculate(elevation_ft, qnh, oat_c, weight, runway_m,
+              flaps=10, packs_off_3=False, runway_dry=True,
               wind_headwind=0, wind_tailwind=0,
-              mel_cdl_penalty=False, windshear_prob=False):
+              mel_cdl_penalty=False, windshear_prob=False,
+              runway_slope_pct=0):
     """
     Calculate takeoff performance parameters per QRH procedure.
-    
+
     Args:
         elevation_ft: Airport elevation in feet
         qnh: Altimeter setting in hPa
         oat_c: Outside air temperature in °C
         weight: Aircraft weight in tons
         runway_m: Runway length in meters
+        flaps: Takeoff flap setting (10 or 20 degrees)
         packs_off_3: True if 3 packs OFF (adds 0.01 to max EPR)
         runway_dry: True if runway is dry
         wind_headwind: Headwind component in knots
         wind_tailwind: Tailwind component in knots
         mel_cdl_penalty: True if MEL/CDL penalties apply
         windshear_prob: True if windshear probability exists
-    
+        runway_slope_pct: Runway slope percentage (positive = uphill)
+
     Returns:
         Dictionary with calculation results
     """
+    # Validate flap setting
+    if flaps not in AVAILABLE_FLAPS:
+        raise ValueError(f"Invalid flap setting. Available: {AVAILABLE_FLAPS}")
+    
     # Calculate pressure altitude
     pa = elevation_ft + (1013.25 - qnh) * 30
     pa_kft = pa / 1000
     
     # Convert temperature
     oat_f = oat_c * 9/5 + 32
+    runway_ft = runway_m * 3.28084
+    
+    # Calculate weight limits
+    runway_limit_k_lbs = calculate_runway_limit_weight(
+        flaps, oat_f, wind_headwind, wind_tailwind, runway_ft, runway_slope_pct
+    )
+    climb_limit_k_lbs = calculate_climb_limit_weight(flaps, pa_kft, oat_f)
+    
+    # Convert actual weight to k lbs for comparison
+    weight_k_lbs = weight * 2.20462  # tons to k lbs
+    
+    # Determine limiting weight and temperature
+    runway_limit_temp = oat_f  # Current temp for runway limit
+    max_runway_temp = None  # Will find highest temp where weight is still allowable
+    
+    # Find maximum assumed temperature for runway-limited performance
+    # (highest temp where actual weight <= runway limit)
+    for temp_f_check in range(int(oat_f), 150):
+        limit_at_temp = calculate_runway_limit_weight(
+            flaps, temp_f_check, wind_headwind, wind_tailwind, runway_ft, runway_slope_pct
+        )
+        if weight_k_lbs <= limit_at_temp:
+            max_runway_temp = temp_f_check
+        else:
+            break
+    
+    # Find maximum assumed temperature for climb-limited performance
+    max_climb_temp = None
+    for temp_f_check in range(int(oat_f), 150):
+        limit_at_temp = calculate_climb_limit_weight(flaps, pa_kft, temp_f_check)
+        if weight_k_lbs <= limit_at_temp:
+            max_climb_temp = temp_f_check
+        else:
+            break
     
     # Check derate restrictions
     allowed, reasons = check_derate_restrictions(
@@ -329,11 +494,24 @@ def calculate(elevation_ft, qnh, oat_c, weight, runway_m,
     
     # Find best assumed temperature using iterative method
     best = None
-    runway_ft = runway_m * 3.28084
+    
+    # Determine the limiting assumed temperature (lower of runway vs climb limits)
+    if max_runway_temp is not None and max_climb_temp is not None:
+        max_assumed_temp_f = min(max_runway_temp, max_climb_temp)
+    elif max_runway_temp is not None:
+        max_assumed_temp_f = max_runway_temp
+    elif max_climb_temp is not None:
+        max_assumed_temp_f = max_climb_temp
+    else:
+        max_assumed_temp_f = int(oat_f)  # No derate possible
     
     # Iterate through possible assumed temperatures
-    for temp_c in range(int(oat_c), 60):
+    for temp_c in range(int(oat_c), min(60, int(max_assumed_temp_f / 1.8 - 32 * 5/9) + 10)):
         temp_f = temp_c * 9/5 + 32
+        
+        # Don't exceed the limiting temperature
+        if temp_f > max_assumed_temp_f:
+            break
         
         # Get reduced EPR for this assumed temperature
         reduced = interp_reduced_epr(max_epr, temp_f)
@@ -362,13 +540,14 @@ def calculate(elevation_ft, qnh, oat_c, weight, runway_m,
     
     # Calculate V-speeds
     assumed_temp_f = assumed_temp_c * 9/5 + 32
-    v1, vr, v2 = v_speeds(weight, assumed_temp_f, oat_f)
+    v1, vr, v2 = v_speeds(weight, assumed_temp_f, oat_f, flaps)
     
     return {
         "PA_ft": round(pa),
         "PA_kft": round(pa_kft, 2),
         "OAT_C": round(oat_c, 1),
         "OAT_F": round(oat_f, 1),
+        "FLAPS": flaps,
         "MAX_EPR": round(max_epr, 3) if max_epr else None,
         "CLIMB_EPR": round(climb_epr, 3),
         "ASSUMED_TEMP_C": assumed_temp_c,
@@ -379,12 +558,17 @@ def calculate(elevation_ft, qnh, oat_c, weight, runway_m,
         "DIST_REQUIRED_FT": round(dist_required * 3.28084),
         "RUNWAY_AVAILABLE_M": runway_m,
         "RUNWAY_AVAILABLE_FT": round(runway_ft),
+        "RUNWAY_LIMIT_WEIGHT": round(runway_limit_k_lbs, 1),
+        "CLIMB_LIMIT_WEIGHT": round(climb_limit_k_lbs, 1),
+        "ACTUAL_WEIGHT_K_LBS": round(weight_k_lbs, 1),
+        "WEIGHT_MARGIN_K_LBS": round(min(runway_limit_k_lbs, climb_limit_k_lbs) - weight_k_lbs, 1),
         "V1": v1,
         "VR": vr,
         "V2": v2,
         "DERATE_ALLOWED": allowed,
         "RESTRICTION_REASONS": reasons,
         "PACKS_OFF_3": packs_off_3,
+        "MAX_ASSUMED_TEMP_F": round(max_assumed_temp_f, 1),
     }
 
 
@@ -401,6 +585,13 @@ if __name__ == "__main__":
     weight = float(input("Weight (tons): "))
     runway = float(input("Runway length (m): "))
     
+    # Flap setting
+    flaps_input = input("Flaps (10/20) [10]: ").strip()
+    flaps = int(flaps_input) if flaps_input else 10
+    if flaps not in AVAILABLE_FLAPS:
+        print(f"Invalid flap setting. Using default: {DEFAULT_FLAPS}")
+        flaps = DEFAULT_FLAPS
+    
     # Optional parameters
     packs_input = input("3 packs OFF? (y/N): ").strip().lower()
     packs_off = packs_input == 'y'
@@ -408,15 +599,21 @@ if __name__ == "__main__":
     dry_input = input("Runway dry? (Y/n): ").strip().lower()
     runway_dry = dry_input != 'n'
     
+    wind_hw = float(input("Headwind (kts) [0]: ").strip() or 0)
+    wind_tw = float(input("Tailwind (kts) [0]: ").strip() or 0)
+    
     res = calculate(
         elev, qnh, oat, weight, runway,
+        flaps=flaps,
         packs_off_3=packs_off,
-        runway_dry=runway_dry
+        runway_dry=runway_dry,
+        wind_headwind=wind_hw,
+        wind_tailwind=wind_tw
     )
     
-    print("\n" + "=" * 40)
+    print("\n" + "=" * 45)
     print("=== RESULT ===")
-    print("=" * 40)
+    print("=" * 45)
     
     if not res["DERATE_ALLOWED"]:
         print("\n⚠️  DERATE NOT ALLOWED:")
@@ -426,6 +623,13 @@ if __name__ == "__main__":
     
     print(f"Pressure Altitude:    {res['PA_ft']} ft ({res['PA_kft']} kft)")
     print(f"OAT:                  {res['OAT_C']}°C / {res['OAT_F']}°F")
+    print(f"Flaps:                {res['FLAPS']}°")
+    print(f"Weight:               {weight} t ({res['ACTUAL_WEIGHT_K_LBS']}k lbs)")
+    print()
+    print(f"Runway Limit Weight:  {res['RUNWAY_LIMIT_WEIGHT']}k lbs")
+    print(f"Climb Limit Weight:   {res['CLIMB_LIMIT_WEIGHT']}k lbs")
+    print(f"Weight Margin:        {res['WEIGHT_MARGIN_K_LBS']}k lbs")
+    print()
     print(f"MAX EPR:              {res['MAX_EPR']}{' (3 packs OFF)' if res['PACKS_OFF_3'] else ' (1 pack ON)'}")
     print(f"Climb EPR (min):      {res['CLIMB_EPR']}")
     print()
@@ -439,4 +643,4 @@ if __name__ == "__main__":
     print(f"V1:                   {res['V1']} knots")
     print(f"VR:                   {res['VR']} knots")
     print(f"V2:                   {res['V2']} knots")
-    print("=" * 40)
+    print("=" * 45)
