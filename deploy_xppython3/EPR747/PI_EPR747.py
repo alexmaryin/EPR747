@@ -116,10 +116,6 @@ class PythonInterface:
         self.dr_weight_kg = self._find_first_dataref([
             "sim/flightmodel/weight/m_total",
         ])
-        self.dr_flap_deg = self._find_first_dataref([
-            "sim/flightmodel2/controls/flap1_deg",
-            "sim/flightmodel2/controls/flap_handle_deploy_ratio",
-        ])
 
     # ---------------------------
     # Menu + window
