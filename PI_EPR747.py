@@ -47,6 +47,9 @@ class PythonInterface:
         self.widgets: Dict[str, Any] = {}
         self.result_lines_left = []
         self.result_lines_right = []
+        self.status_widget = None
+        self.status_text = ""
+        self.status_alert = False
 
         self.dr_elevation_m = None
         self.dr_qnh_inhg = None
@@ -153,6 +156,9 @@ class PythonInterface:
             self.widgets = {}
             self.result_lines_left = []
             self.result_lines_right = []
+            self.status_widget = None
+            self.status_text = ""
+            self.status_alert = False
 
     def _create_widget_window(self):
         window = {"widgetID": None, "widgets": {}}
@@ -372,6 +378,10 @@ class PythonInterface:
             self.result_lines_right.append(line_widget_right)
             line_y -= 17
 
+        if self.result_lines_left:
+            self.status_widget = self.result_lines_left[0]
+            xp.addWidgetCallback(self.status_widget, self._status_widget_callback)
+
         self.widgets = window["widgets"]
         return window
 
@@ -537,18 +547,32 @@ class PythonInterface:
         left_lines = lines[:left_count]
         right_lines = lines[left_count:left_count + len(self.result_lines_right)]
 
+        # Status line is custom drawn so we can force red text when needed.
+        if left_lines:
+            self.status_text = left_lines[0]
+            self.status_alert = alert
+            left_lines[0] = ""
+
         for widget_id, text in zip(self.result_lines_left, left_lines):
             xp.setWidgetDescriptor(widget_id, text)
         for widget_id, text in zip(self.result_lines_right, right_lines):
             xp.setWidgetDescriptor(widget_id, text)
 
-        # Best-effort visual alert for the status line.
-        caption_lit_prop = getattr(xp, "Property_CaptionLit", None)
-        if caption_lit_prop is not None:
-            try:
-                xp.setWidgetProperty(self.result_lines_left[0], caption_lit_prop, 1 if alert else 0)
-            except Exception:
-                pass
+    def _status_widget_callback(self, inMessage, inWidget, inParam1, inParam2):
+        draw_msg = getattr(xp, "Msg_Draw", None)
+        if draw_msg is None or inMessage != draw_msg:
+            return 0
+
+        if inWidget != self.status_widget:
+            return 0
+
+        try:
+            left, top, right, bottom = xp.getWidgetGeometry(inWidget)
+            color = [1.0, 0.0, 0.0] if self.status_alert else [0.0, 0.0, 0.0]
+            xp.drawString(color, left + 1, top - 13, self.status_text, None, xp.Font_Basic)
+            return 1
+        except Exception:
+            return 0
 
     @staticmethod
     def _safe_get_float(dataref) -> Optional[float]:
