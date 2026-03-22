@@ -220,7 +220,7 @@ class PythonInterface:
         add_text_row("tailwind", "Tailwind (kts)", "0")
         add_text_row("runway_slope_pct", "Runway slope (%)", "0")
 
-        # Flap selector as single toggle: checked=20, unchecked=10.
+        # Flap selector as label + checkbox: checked=20, unchecked=10.
         xp.createWidget(
             label_x,
             row_y,
@@ -232,21 +232,33 @@ class PythonInterface:
             window["widgetID"],
             xp.WidgetClass_Caption,
         )
-        flap20_id = xp.createWidget(
+        flap20_box_id = xp.createWidget(
             field_x1,
             row_y,
-            field_x2,
-            row_y - 20,
+            field_x1 + 16,
+            row_y - 16,
             1,
-            "Flaps 20 (unchecked = Flaps 10)",
+            "",
             0,
             window["widgetID"],
             xp.WidgetClass_Button,
         )
-        xp.setWidgetProperty(flap20_id, xp.Property_ButtonType, xp.RadioButton)
-        xp.setWidgetProperty(flap20_id, xp.Property_ButtonBehavior, xp.ButtonBehaviorCheckBox)
-        window["widgets"]["flaps_20"] = flap20_id
-        xp.setWidgetProperty(flap20_id, xp.Property_ButtonState, 0)
+        xp.setWidgetProperty(flap20_box_id, xp.Property_ButtonType, xp.RadioButton)
+        xp.setWidgetProperty(flap20_box_id, xp.Property_ButtonBehavior, xp.ButtonBehaviorCheckBox)
+        xp.setWidgetProperty(flap20_box_id, xp.Property_ButtonState, 0)
+        window["widgets"]["flaps_20"] = flap20_box_id
+
+        xp.createWidget(
+            field_x1 + 22,
+            row_y,
+            field_x2,
+            row_y - 18,
+            1,
+            "Flaps 20 (default - 10)",
+            0,
+            window["widgetID"],
+            xp.WidgetClass_Caption,
+        )
         row_y -= row_step
 
         # Checkbox rows.
@@ -435,44 +447,47 @@ class PythonInterface:
     def _calculate_from_ui(self):
         if self.calculate_func is None:
             msg = self.import_error or "Calculator backend not available"
-            self._set_results([msg])
+            self._set_results([msg], alert=True)
             return
 
         try:
             inputs = self._read_inputs()
         except ValueError as exc:
-            self._set_results([f"Input error: {exc}"])
+            self._set_results([f"Input error: {exc}"], alert=True)
             return
 
         try:
             res = self.calculate_func(**inputs)
         except Exception as exc:
-            self._set_results([f"Calculation error: {exc}"])
+            self._set_results([f"Calculation error: {exc}"], alert=True)
             return
 
         lines = [
+            "Derate available",
             f"PA: {res['PA_ft']} ft",
             f"OAT: {res['OAT_C']} C / {res['OAT_F']} F",
             f"Flaps: {res['FLAPS']}",
             f"MAX EPR: {res['MAX_EPR']}",
             f"CLB EPR: {res['CLIMB_EPR']}",
-            f"RED EPR: {res['REDUCED_EPR']}",
             f"AT: {res['ASSUMED_TEMP_C']} C / {res['ASSUMED_TEMP_F']} F",
             f"TR: {res['THRUST_RATIO'] * 100:.0f}%",
             f"Dist Req: {res['DIST_REQUIRED_M']} m ({res['DIST_REQUIRED_FT']} ft)",
             f"Rwy Avail: {res['RUNWAY_AVAILABLE_M']} m ({res['RUNWAY_AVAILABLE_FT']} ft)",
-            f"Rwy Wt: {res['RUNWAY_LIMIT_WEIGHT']}k | Clb Wt: {res['CLIMB_LIMIT_WEIGHT']}k",
-            f"Act Wt: {res['ACTUAL_WEIGHT_K_LBS']}k | Margin: {res['WEIGHT_MARGIN_K_LBS']}k",
             f"V1/VR/V2: {res['V1']}/{res['VR']}/{res['V2']} kt",
+            f"RED EPR: {res['REDUCED_EPR']}",
         ]
 
         if not res["DERATE_ALLOWED"]:
-            reasons = "; ".join(res["RESTRICTION_REASONS"]) or "Restrictions apply"
-            lines.append(f"Derate NOT allowed: {reasons}")
-        else:
-            lines.append("Derate allowed under entered conditions")
+            reasons = res["RESTRICTION_REASONS"] or ["Restrictions apply"]
+            reason_short = reasons[0]
+            if len(reasons) > 1:
+                reason_short += f" (+{len(reasons) - 1} more)"
+            lines[0] = "EPR REDUCTION NOT AVAILABLE"
+            lines[-1] = f"Reason: {reason_short}"
+            self._set_results(lines, alert=True)
+            return
 
-        self._set_results(lines)
+        self._set_results(lines, alert=False)
 
     def _read_inputs(self) -> Dict[str, Any]:
         flaps = 20 if self._is_checked("flaps_20") else 10
@@ -509,7 +524,7 @@ class PythonInterface:
         widget_id = self.widgets[key]
         return xp.getWidgetProperty(widget_id, xp.Property_ButtonState) == 1
 
-    def _set_results(self, lines):
+    def _set_results(self, lines, alert: bool = False):
         if not self.result_lines_left or not self.result_lines_right:
             return
 
@@ -526,6 +541,14 @@ class PythonInterface:
             xp.setWidgetDescriptor(widget_id, text)
         for widget_id, text in zip(self.result_lines_right, right_lines):
             xp.setWidgetDescriptor(widget_id, text)
+
+        # Best-effort visual alert for the status line.
+        caption_lit_prop = getattr(xp, "Property_CaptionLit", None)
+        if caption_lit_prop is not None:
+            try:
+                xp.setWidgetProperty(self.result_lines_left[0], caption_lit_prop, 1 if alert else 0)
+            except Exception:
+                pass
 
     @staticmethod
     def _safe_get_float(dataref) -> Optional[float]:
