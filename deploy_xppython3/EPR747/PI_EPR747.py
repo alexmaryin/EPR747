@@ -45,7 +45,8 @@ class PythonInterface:
         self.window = None
 
         self.widgets: Dict[str, Any] = {}
-        self.result_lines = []
+        self.result_lines_left = []
+        self.result_lines_right = []
 
         self.dr_elevation_m = None
         self.dr_qnh_inhg = None
@@ -116,6 +117,10 @@ class PythonInterface:
         self.dr_weight_kg = self._find_first_dataref([
             "sim/flightmodel/weight/m_total",
         ])
+        # self.dr_flap_deg = self._find_first_dataref([
+        #     "sim/flightmodel2/controls/flap1_deg",
+        #     "sim/flightmodel2/controls/flap_handle_deploy_ratio",
+        # ])
 
     # ---------------------------
     # Menu + window
@@ -146,7 +151,8 @@ class PythonInterface:
             xp.destroyWidget(self.window["widgetID"], 1)
             self.window = None
             self.widgets = {}
-            self.result_lines = []
+            self.result_lines_left = []
+            self.result_lines_right = []
 
     def _create_widget_window(self):
         window = {"widgetID": None, "widgets": {}}
@@ -214,7 +220,7 @@ class PythonInterface:
         add_text_row("tailwind", "Tailwind (kts)", "0")
         add_text_row("runway_slope_pct", "Runway slope (%)", "0")
 
-        # Flap selector as dedicated radio controls.
+        # Flap selector as single toggle: checked=20, unchecked=10.
         xp.createWidget(
             label_x,
             row_y,
@@ -226,34 +232,20 @@ class PythonInterface:
             window["widgetID"],
             xp.WidgetClass_Caption,
         )
-        flap10_id = xp.createWidget(
+        flap20_id = xp.createWidget(
             field_x1,
             row_y,
-            field_x1 + 90,
+            field_x2,
             row_y - 20,
             1,
-            "10",
+            "Flaps 20 (unchecked = Flaps 10)",
             0,
             window["widgetID"],
             xp.WidgetClass_Button,
         )
-        flap20_id = xp.createWidget(
-            field_x1 + 100,
-            row_y,
-            field_x1 + 190,
-            row_y - 20,
-            1,
-            "20",
-            0,
-            window["widgetID"],
-            xp.WidgetClass_Button,
-        )
-        for widget_id in (flap10_id, flap20_id):
-            xp.setWidgetProperty(widget_id, xp.Property_ButtonType, xp.RadioButton)
-            xp.setWidgetProperty(widget_id, xp.Property_ButtonBehavior, xp.ButtonBehaviorRadioButton)
-        window["widgets"]["flaps_10"] = flap10_id
+        xp.setWidgetProperty(flap20_id, xp.Property_ButtonType, xp.RadioButton)
+        xp.setWidgetProperty(flap20_id, xp.Property_ButtonBehavior, xp.ButtonBehaviorCheckBox)
         window["widgets"]["flaps_20"] = flap20_id
-        xp.setWidgetProperty(flap10_id, xp.Property_ButtonState, 1)
         xp.setWidgetProperty(flap20_id, xp.Property_ButtonState, 0)
         row_y -= row_step
 
@@ -336,11 +328,25 @@ class PythonInterface:
             xp.WidgetClass_Caption,
         )
 
-        self.result_lines = []
+        self.result_lines_left = []
+        self.result_lines_right = []
         line_y = results_top - 22
-        for idx in range(11):
-            line_widget = xp.createWidget(
+        left_col_right = label_x + 300
+        right_col_left = left_col_right + 14
+        for _ in range(6):
+            line_widget_left = xp.createWidget(
                 label_x,
+                line_y,
+                left_col_right,
+                line_y - 16,
+                1,
+                "",
+                0,
+                window["widgetID"],
+                xp.WidgetClass_Caption,
+            )
+            line_widget_right = xp.createWidget(
+                right_col_left,
                 line_y,
                 field_x2,
                 line_y - 16,
@@ -350,7 +356,8 @@ class PythonInterface:
                 window["widgetID"],
                 xp.WidgetClass_Caption,
             )
-            self.result_lines.append(line_widget)
+            self.result_lines_left.append(line_widget_left)
+            self.result_lines_right.append(line_widget_right)
             line_y -= 17
 
         self.widgets = window["widgets"]
@@ -374,12 +381,6 @@ class PythonInterface:
             if inParam1 == self.widgets.get("refresh_btn"):
                 self._refresh_fields_from_sim()
                 self._set_results(["Inputs refreshed from available sim datarefs."])
-                return 1
-            if inParam1 == self.widgets.get("flaps_10"):
-                self._set_flaps_selector(10)
-                return 1
-            if inParam1 == self.widgets.get("flaps_20"):
-                self._set_flaps_selector(20)
                 return 1
             if inParam1 == self.widgets.get("calc_btn"):
                 self._calculate_from_ui()
@@ -425,7 +426,7 @@ class PythonInterface:
             if flap_deg <= 1.0:
                 flap_deg *= 30.0
             flap_sel = 20 if flap_deg >= 15.0 else 10
-            self._set_flaps_selector(flap_sel)
+            xp.setWidgetProperty(self.widgets["flaps_20"], xp.Property_ButtonState, 1 if flap_sel == 20 else 0)
 
     # ---------------------------
     # Calculation
@@ -450,16 +451,19 @@ class PythonInterface:
             return
 
         lines = [
-            f"PA: {res['PA_ft']} ft | OAT: {res['OAT_C']} C / {res['OAT_F']} F | Flaps: {res['FLAPS']}",
-            f"MAX EPR: {res['MAX_EPR']} | CLIMB EPR: {res['CLIMB_EPR']} | REDUCED EPR: {res['REDUCED_EPR']}",
-            f"Assumed Temp: {res['ASSUMED_TEMP_C']} C / {res['ASSUMED_TEMP_F']} F",
-            f"Thrust Ratio: {res['THRUST_RATIO'] * 100:.0f}%",
-            f"Distance Req: {res['DIST_REQUIRED_M']} m ({res['DIST_REQUIRED_FT']} ft)",
-            f"Runway Avail: {res['RUNWAY_AVAILABLE_M']} m ({res['RUNWAY_AVAILABLE_FT']} ft)",
-            f"Runway Limit Wt: {res['RUNWAY_LIMIT_WEIGHT']}k lbs",
-            f"Climb Limit Wt: {res['CLIMB_LIMIT_WEIGHT']}k lbs",
-            f"Actual Wt: {res['ACTUAL_WEIGHT_K_LBS']}k lbs | Margin: {res['WEIGHT_MARGIN_K_LBS']}k lbs",
-            f"V1/VR/V2: {res['V1']} / {res['VR']} / {res['V2']} kt",
+            f"PA: {res['PA_ft']} ft",
+            f"OAT: {res['OAT_C']} C / {res['OAT_F']} F",
+            f"Flaps: {res['FLAPS']}",
+            f"MAX EPR: {res['MAX_EPR']}",
+            f"CLB EPR: {res['CLIMB_EPR']}",
+            f"RED EPR: {res['REDUCED_EPR']}",
+            f"AT: {res['ASSUMED_TEMP_C']} C / {res['ASSUMED_TEMP_F']} F",
+            f"TR: {res['THRUST_RATIO'] * 100:.0f}%",
+            f"Dist Req: {res['DIST_REQUIRED_M']} m ({res['DIST_REQUIRED_FT']} ft)",
+            f"Rwy Avail: {res['RUNWAY_AVAILABLE_M']} m ({res['RUNWAY_AVAILABLE_FT']} ft)",
+            f"Rwy Wt: {res['RUNWAY_LIMIT_WEIGHT']}k | Clb Wt: {res['CLIMB_LIMIT_WEIGHT']}k",
+            f"Act Wt: {res['ACTUAL_WEIGHT_K_LBS']}k | Margin: {res['WEIGHT_MARGIN_K_LBS']}k",
+            f"V1/VR/V2: {res['V1']}/{res['VR']}/{res['V2']} kt",
         ]
 
         if not res["DERATE_ALLOWED"]:
@@ -489,10 +493,6 @@ class PythonInterface:
             "runway_slope_pct": float(self._get_text("runway_slope_pct")),
         }
 
-    def _set_flaps_selector(self, flaps: int):
-        xp.setWidgetProperty(self.widgets["flaps_10"], xp.Property_ButtonState, 1 if flaps == 10 else 0)
-        xp.setWidgetProperty(self.widgets["flaps_20"], xp.Property_ButtonState, 1 if flaps == 20 else 0)
-
     # ---------------------------
     # Widget utility helpers
     # ---------------------------
@@ -510,14 +510,21 @@ class PythonInterface:
         return xp.getWidgetProperty(widget_id, xp.Property_ButtonState) == 1
 
     def _set_results(self, lines):
-        if not self.result_lines:
+        if not self.result_lines_left or not self.result_lines_right:
             return
 
-        lines = list(lines)[: len(self.result_lines)]
-        while len(lines) < len(self.result_lines):
+        max_lines = len(self.result_lines_left) + len(self.result_lines_right)
+        lines = list(lines)[:max_lines]
+        while len(lines) < max_lines:
             lines.append("")
 
-        for widget_id, text in zip(self.result_lines, lines):
+        left_count = len(self.result_lines_left)
+        left_lines = lines[:left_count]
+        right_lines = lines[left_count:left_count + len(self.result_lines_right)]
+
+        for widget_id, text in zip(self.result_lines_left, left_lines):
+            xp.setWidgetDescriptor(widget_id, text)
+        for widget_id, text in zip(self.result_lines_right, right_lines):
             xp.setWidgetDescriptor(widget_id, text)
 
     @staticmethod
